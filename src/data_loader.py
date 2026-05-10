@@ -43,35 +43,34 @@ class EyeDataset:
         img_size: int,
         train_fraction: float = 1.0,
     ) -> tuple[DataLoader, DataLoader]:
-        """Возвращает (train_loader, test_loader) для заданного разрешения изображений."""
-        root = self._find_dataset_root()
+        """
+        Возвращает (train_loader, test_loader).
 
-        train_ds = ImageFolder(root / "train", transform=self._train_transform(img_size))
-        test_ds  = ImageFolder(root / "test",  transform=self._test_transform(img_size))
+        Датасет не имеет готового train/test разбиения — делаем его вручную
+        стратифицированно по классам (80/20 по умолчанию из config.train_ratio).
+        """
+        root    = self._find_dataset_root()
+        # Загружаем весь датасет с тестовым transform (без аугментаций)
+        full_ds = ImageFolder(root, transform=self._test_transform(img_size))
+        self.class_names = full_ds.classes
 
-        # Сохраняем имена классов в алфавитном порядке (так работает ImageFolder)
-        self.class_names = train_ds.classes
+        train_idx, test_idx = self._stratified_split(full_ds, self.config.train_ratio)
 
+        # Применяем train_fraction поверх train-сплита
         if train_fraction < 1.0:
-            n        = int(len(train_ds) * train_fraction)
-            indices  = torch.randperm(len(train_ds))[:n].tolist()
-            train_ds = Subset(train_ds, indices)
+            n          = int(len(train_idx) * train_fraction)
+            train_idx  = train_idx[:n]
 
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=2,
-            pin_memory=(self.config.device == "cuda"),
-        )
-        test_loader = DataLoader(
-            test_ds,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=2,
-            pin_memory=(self.config.device == "cuda"),
-        )
-        return train_loader, test_loader
+        # Тренировочному сплиту нужен отдельный датасет с аугментациями
+        train_ds_aug = ImageFolder(root, transform=self._train_transform(img_size))
+
+        train_ds = Subset(train_ds_aug, train_idx)
+        test_ds  = Subset(full_ds,      test_idx)
+
+        kw = dict(batch_size=self.config.batch_size, num_workers=2,
+                  pin_memory=(self.config.device == "cuda"))
+        return (DataLoader(train_ds, shuffle=True,  **kw),
+                DataLoader(test_ds,  shuffle=False, **kw))
 
     def compute_centroids(self, loader: DataLoader) -> torch.Tensor:
         """
@@ -127,23 +126,49 @@ class EyeDataset:
             transforms.Normalize(self._MEAN, self._STD),
         ])
 
+    def _stratified_split(
+        self, dataset: ImageFolder, train_ratio: float
+    ) -> tuple[list[int], list[int]]:
+        """
+        Стратифицированный сплит: сохраняет пропорции классов в train и test.
+        Внутри каждого класса перемешиваем случайно для разных повторений Монте-Карло.
+        """
+        from collections import defaultdict
+        class_indices: dict[int, list[int]] = defaultdict(list)
+        for idx, (_, label) in enumerate(dataset.samples):
+            class_indices[label].append(idx)
+
+        train_idx, test_idx = [], []
+        for indices in class_indices.values():
+            perm  = torch.randperm(len(indices)).tolist()
+            split = int(len(indices) * train_ratio)
+            train_idx.extend([indices[i] for i in perm[:split]])
+            test_idx.extend( [indices[i] for i in perm[split:]])
+
+        return train_idx, test_idx
+
     def _find_dataset_root(self) -> Path:
         """
-        Находит корневую папку датасета после распаковки Kaggle.
-        Kaggle иногда создаёт вложенную директорию при --unzip.
+        Находит папку с подпапками классов после распаковки Kaggle.
+        Поддерживает структуру: data/raw/dataset/{class}/ или data/raw/{class}/.
         """
         if not self.data_dir.exists():
             raise FileNotFoundError(
                 f"Директория {self.data_dir} не найдена. Запустите download() сначала."
             )
 
-        # Проверяем сначала сам data_dir, затем его прямые поддиректории
+        # Папка с классами — та, в которой лежат только директории (не файлы изображений)
         candidates = [self.data_dir, *(p for p in self.data_dir.iterdir() if p.is_dir())]
         for candidate in candidates:
-            if (candidate / "train").exists():
+            subdirs = [p for p in candidate.iterdir() if p.is_dir()]
+            # Признак папки с классами: все поддиректории содержат изображения
+            if subdirs and all(
+                any(f.suffix.lower() in (".jpg", ".jpeg", ".png") for f in d.iterdir())
+                for d in subdirs
+            ):
                 return candidate
 
         raise FileNotFoundError(
-            f"Не удалось найти папку 'train' в {self.data_dir}. "
-            "Проверьте структуру скачанного датасета."
+            f"Не удалось найти папки классов в {self.data_dir}. "
+            "Проверьте структуру датасета."
         )
