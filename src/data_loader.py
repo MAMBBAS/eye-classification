@@ -28,15 +28,24 @@ class EyeDataset:
     # ------------------------------------------------------------------
 
     def download(self) -> None:
-        """Скачивает датасет с Kaggle если данные ещё не существуют."""
+        """Скачивает датасет с Kaggle если данные ещё не существуют.
+
+        В Kaggle Notebook датасет монтируется через UI и уже доступен —
+        вызов kaggle CLI не нужен и заблокирован сетью.
+        """
         if self.data_dir.exists() and any(self.data_dir.iterdir()):
-            print("Dataset already present, skipping download.")
+            print(f"Датасет уже доступен: {self.data_dir}")
             return
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        os.system(
+        ret = os.system(
             f"kaggle datasets download -d {self.config.kaggle_dataset} "
             f"-p {self.data_dir} --unzip"
         )
+        if ret != 0:
+            raise RuntimeError(
+                "Не удалось скачать датасет. В Kaggle Notebook добавьте датасет "
+                "через кнопку '+ Add Input' в правой панели."
+            )
 
     def get_loaders(
         self,

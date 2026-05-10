@@ -1,12 +1,17 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 import torch
+
+# Kaggle Notebooks монтируют датасеты в /kaggle/input/<dataset-slug>/
+_KAGGLE_INPUT = Path("/kaggle/input/eye-diseases-classification")
+_IN_KAGGLE    = _KAGGLE_INPUT.exists()
 
 
 @dataclass
 class ExperimentConfig:
     # --- Данные ---
     kaggle_dataset: str              = "gunavenkatdoddi/eye-diseases-classification"
-    raw_data_dir: str                = "data/raw"
+    raw_data_dir: str                = str(_KAGGLE_INPUT) if _IN_KAGGLE else "data/raw"
     img_sizes: tuple[int, ...]       = (32, 128)
     train_ratio: float               = 0.8
     batch_size: int                  = 32
